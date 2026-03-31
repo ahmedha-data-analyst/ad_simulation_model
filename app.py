@@ -1002,7 +1002,6 @@ st.markdown("---")
 st.markdown(
     f'<div class="hs-footer">'
     f'© HydroStar Europe Ltd. &nbsp;·&nbsp; '
-    f'Equilibrium model only — does not include kinetics or mass-transfer effects'
     f'</div>',
     unsafe_allow_html=True,
 )
