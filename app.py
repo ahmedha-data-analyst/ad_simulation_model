@@ -716,33 +716,33 @@ with tab1:
             )
 
         fs_data = SCENARIO1_FEEDSTOCKS[fs_choice]
-        with st.expander("View feedstock properties"):
-            pc1, pc2, pc3, pc4, pc5 = st.columns(5)
-            pc1.metric(
-                "Specific methane yield",
-                f"{fs_data['smp']} m³/kg VS",
-                help="Specific methane production (SMP) — volume of CH₄ produced per kg of volatile solids. Higher values mean more energy-dense feedstock.",
-            )
-            pc2.metric(
-                "CH₄ baseline",
-                f"{fs_data['ch4_baseline']:.0%}",
-                help="Methane fraction in the biogas before H₂ injection. This is the starting CH₄ concentration.",
-            )
-            pc3.metric(
-                "CO₂ baseline",
-                f"{fs_data['co2_baseline']:.0%}",
-                help="CO₂ fraction in the biogas before H₂ injection. This CO₂ is the feedstock for the biomethanisation reaction.",
-            )
-            pc4.metric(
-                "Digester pH",
-                f"{fs_data['ph_baseline']}",
-                help="Typical operating pH for this feedstock. pH affects CO₂ solubility and methanogen activity.",
-            )
-            pc5.metric(
-                "Volatile solids",
-                f"{fs_data['vs']:.0%}",
-                help="Volatile solids (VS) fraction of the feedstock — the biodegradable portion that produces biogas. Used in blending calculations.",
-            )
+        st.markdown('<div class="sec-head">Feedstock properties</div>', unsafe_allow_html=True)
+        pc1, pc2, pc3, pc4, pc5 = st.columns(5)
+        pc1.metric(
+            "Specific methane yield",
+            f"{fs_data['smp']} m³/kg VS",
+            help="Specific methane production (SMP) — volume of CH₄ produced per kg of volatile solids. Higher values mean more energy-dense feedstock.",
+        )
+        pc2.metric(
+            "CH₄ baseline",
+            f"{fs_data['ch4_baseline']:.0%}",
+            help="Methane fraction in the biogas before H₂ injection. This is the starting CH₄ concentration.",
+        )
+        pc3.metric(
+            "CO₂ baseline",
+            f"{fs_data['co2_baseline']:.0%}",
+            help="CO₂ fraction in the biogas before H₂ injection. This CO₂ is the feedstock for the biomethanisation reaction.",
+        )
+        pc4.metric(
+            "Digester pH",
+            f"{fs_data['ph_baseline']}",
+            help="Typical operating pH for this feedstock. pH affects CO₂ solubility and methanogen activity.",
+        )
+        pc5.metric(
+            "Volatile solids",
+            f"{fs_data['vs']:.0%}",
+            help="Volatile solids (VS) fraction of the feedstock — the biodegradable portion that produces biogas. Used in blending calculations.",
+        )
 
         res = run_scenario1_single(fs_choice, temp_c, biogas_s1, exog_s1)
         render_results(res)
@@ -972,8 +972,8 @@ with tab3:
         })
     st.dataframe(simple_rows, use_container_width=True, hide_index=True)
 
-    with st.expander("Notes on feedstock data"):
-        st.markdown(f"""
+    st.markdown('<div class="sec-head">Notes on feedstock data</div>', unsafe_allow_html=True)
+    st.markdown(f"""
 **Food waste — volatile solids (20%):**
 Applies to source-segregated household food waste only, not commercial food waste which varies significantly.
 
