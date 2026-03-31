@@ -325,6 +325,17 @@ st.markdown(f"""
         font-size: 1rem !important;
         font-weight: 600;
     }}
+    details[data-testid="stExpander"] summary span[data-testid="stExpanderToggleIcon"] svg {{
+        fill: {PRIMARY_GREEN} !important;
+    }}
+    /* Hide the raw arrow text that bleeds through in some Streamlit builds */
+    details[data-testid="stExpander"] summary p {{
+        display: inline !important;
+        overflow: hidden !important;
+    }}
+    details[data-testid="stExpander"] summary::before {{
+        content: none !important;
+    }}
 
     /* ── Dividers ── */
     hr {{
