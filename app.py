@@ -325,16 +325,25 @@ st.markdown(f"""
         font-size: 1rem !important;
         font-weight: 600;
     }}
-    details[data-testid="stExpander"] summary span[data-testid="stExpanderToggleIcon"] svg {{
+    /* Hide the _arrow_right / _arrow_drop_down text that Streamlit Cloud renders visibly */
+    details[data-testid="stExpander"] summary span {{
+        font-size: 0 !important;
+        line-height: 0 !important;
+        color: transparent !important;
+    }}
+    /* Restore font size for the actual label text inside the span */
+    details[data-testid="stExpander"] summary span p,
+    details[data-testid="stExpander"] summary > div,
+    details[data-testid="stExpander"] summary > p {{
+        font-size: 1rem !important;
+        line-height: 1.5 !important;
+        color: {PRIMARY_GREEN} !important;
+    }}
+    /* Keep the SVG arrow icon visible */
+    details[data-testid="stExpander"] summary span svg {{
+        width: 1.2rem !important;
+        height: 1.2rem !important;
         fill: {PRIMARY_GREEN} !important;
-    }}
-    /* Hide the raw arrow text that bleeds through in some Streamlit builds */
-    details[data-testid="stExpander"] summary p {{
-        display: inline !important;
-        overflow: hidden !important;
-    }}
-    details[data-testid="stExpander"] summary::before {{
-        content: none !important;
     }}
 
     /* ── Dividers ── */
