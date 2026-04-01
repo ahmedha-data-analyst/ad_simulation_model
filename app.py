@@ -1313,7 +1313,7 @@ may mean slightly more H₂ is needed to achieve the same conversion. This model
 st.markdown("---")
 st.markdown(
     f'<div class="hs-footer">'
-    f'© HydroStar Europe Ltd. &nbsp;·&nbsp; '
+    f'© HydroStar Europe Ltd.'
     f'</div>',
     unsafe_allow_html=True,
 )
