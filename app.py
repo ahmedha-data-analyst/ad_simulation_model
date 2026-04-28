@@ -526,7 +526,7 @@ with st.container():
         pKw_val = calc_pKw(temp_c)
         st.markdown(f"""
         <div class="callout" style="margin-top:28px; padding: 12px 18px;">
-            <strong>pKw</strong> at {temp_c:.1f} °C &nbsp;=&nbsp; <span style="color:{PRIMARY_GREEN}; font-size:1.15rem; font-weight:700;">{pKw_val:.4f}</span>
+            <strong>pKw</strong> at {temp_c:.1f} °C &nbsp;=&nbsp; <span style="color:{PRIMARY_GREEN}; font-size:1.15rem; font-weight:700;">{round(pKw_val)}</span>
             <br/><span style="font-size:0.88rem; color:{LIGHT_GREY};">Temperature-dependent water dissociation constant used in CO₂ equilibrium calculations</span>
         </div>
         """, unsafe_allow_html=True)
@@ -558,11 +558,19 @@ tab1, tab2, tab3 = st.tabs([
 def render_results(res: dict):
     """Render a clean output panel for any scenario result dict."""
 
-    if res.get("co2_converted", 0) == 0 and res.get("co2_after", 0) > res.get("co2_baseline", 0):
+    ph_baseline = res.get("ph_baseline")
+    if ph_baseline is not None and ph_baseline >= PH_UPPER_LIMIT:
+        st.error(
+            f"Digester pH ({ph_baseline:.1f}) already equals or exceeds the safety cap of "
+            f"{PH_UPPER_LIMIT}. No pH rise is permitted, so no CO₂ conversion is "
+            f"possible. Reduce the digester pH below {PH_UPPER_LIMIT} before injecting H₂.",
+            icon="🚫",
+        )
+    elif res.get("co2_converted", 0) == 0 and res.get("co2_after", 0) > res.get("co2_baseline", 0):
         st.warning(
             "No net CO₂ conversion is possible at these inputs — "
             "the equilibrium CO₂ partial pressure exceeds the available CO₂. "
-            "Try increasing biogas volume, adding exogenous CO₂, or adjusting pH.",
+            "Try increasing biogas volume or adding exogenous CO₂.",
             icon="⚠️",
         )
 
@@ -978,14 +986,16 @@ with tab1:
                                 help="First feedstock type in the blend.")
             pct1 = st.slider(
                 "Proportion A", 0.0, 1.0, 0.5, 0.05, key="pct_mix_a",
-                help="Fraction of feedstock A in the mix (0 = none, 1 = 100%). The two fractions are normalised automatically.",
+                help="Fraction of feedstock A in the mix (0 = none, 1 = 100%). Proportion B is set automatically as 1 − A.",
             )
         with col_b:
             fs2  = st.selectbox("Feedstock B", fs_names, index=1, key="fs_mix_b",
                                 help="Second feedstock type in the blend.")
-            pct2 = st.slider(
-                "Proportion B", 0.0, 1.0, 0.5, 0.05, key="pct_mix_b",
-                help="Fraction of feedstock B in the mix (0 = none, 1 = 100%). The two fractions are normalised automatically.",
+            pct2 = round(1.0 - pct1, 10)
+            st.metric(
+                "Proportion B (auto)",
+                f"{pct2:.0%}",
+                help="Set automatically as 1 − Proportion A. The two proportions always sum to 100%.",
             )
 
         col_bg2, col_ex2 = st.columns(2)
@@ -1040,6 +1050,13 @@ with tab2:
                 "pH directly affects CO₂ solubility and the activity of methanogens. "
                 "Read this from your online pH monitor or lab sample."
             ),
+        )
+    if ph_s2 >= PH_UPPER_LIMIT:
+        st.error(
+            f"Digester pH ({ph_s2:.1f}) already equals or exceeds the safety cap of "
+            f"{PH_UPPER_LIMIT}. No pH rise is permitted, so no CO₂ conversion is "
+            f"possible. Reduce the digester pH below {PH_UPPER_LIMIT} before injecting H₂.",
+            icon="🚫",
         )
     with row1_c2:
         co2_pp_s2 = st.number_input(
@@ -1313,7 +1330,7 @@ may mean slightly more H₂ is needed to achieve the same conversion. This model
 st.markdown("---")
 st.markdown(
     f'<div class="hs-footer">'
-    f'© HydroStar Europe Ltd.'
+    f'© HydroStar Europe Ltd. &nbsp;·&nbsp; '
     f'</div>',
     unsafe_allow_html=True,
 )
