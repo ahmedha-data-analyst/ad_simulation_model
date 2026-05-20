@@ -1,6 +1,21 @@
 """
-HydroStar — Biogas Model Calculator
+HydroStar — Biogas Model Calculator  (SIF thermodynamic model v4)
+
 Thermodynamic equilibrium model for hydrogen injection in anaerobic digestion.
+
+Key v4 change vs v3
+-------------------
+Pressure is now explicit. In v3 the CO₂ after biomethanisation was a simple
+gas fraction. In v4:
+  1. The CO₂ baseline is converted to a *partial pressure* (kPa) using the
+     baseline (atmospheric) pressure.
+  2. The pH-equilibrium shift is applied to that partial pressure.
+  3. The result is divided by the *operating* pressure to get the new CO₂
+     gas fraction.
+
+Because operating pressure (e.g. 300 kPa) is typically higher than baseline
+pressure (101.325 kPa), the CO₂ gets compressed into a smaller fraction of
+the biogas — which means more CO₂ is convertible and more H₂ can be injected.
 """
 
 import math
@@ -21,6 +36,10 @@ LIGHT_GREY      = "#8c919a"
 CARD_BG         = "#3a3f49"
 H2_CO2_RATIO    = 4        # Stoichiometric: CO₂ + 4H₂ → CH₄ + 2H₂O
 PH_UPPER_LIMIT  = 8.2      # Safety cap — methanogen inhibition above this
+
+# v4 default pressures
+DEFAULT_BASELINE_PRESSURE  = 101.325   # kPa — atmospheric
+DEFAULT_OPERATING_PRESSURE = 300.0     # kPa — typical pressurised digester
 
 # Section accent colours — each section of the UI has its own identity
 COL_INPUT   = "#4a9aba"   # Blue  — things you enter / feedstock properties
@@ -83,19 +102,47 @@ EXTENDED_FEEDSTOCKS_CALC = {
 }
 
 # ──────────────────────────────────────────────────────────────────────────────
-# CORE CALCULATION FUNCTIONS
+# CORE CALCULATION FUNCTIONS  (v4 — pressure aware)
 # ──────────────────────────────────────────────────────────────────────────────
 
 def calc_pKw(temp_c: float) -> float:
+    """Water dissociation constant pKw as a function of digester temperature.
+
+    Formula from the Excel model:  pKw = 0.09018 + 2729.92 / (273.15 + T°C)
+    """
     return 0.09018 + 2729.92 / (273.15 + temp_c)
 
 
 def calc_max_ph(ph_baseline: float, ph_change_allowed: float) -> float:
+    """Maximum permitted digester pH after biomethanisation.
+
+    Capped at PH_UPPER_LIMIT (8.2) to protect the methanogens.
+    """
     return min(ph_baseline + ph_change_allowed, PH_UPPER_LIMIT)
+
+
+def calc_co2_pp_baseline(baseline_pressure_kpa: float, baseline_co2_fraction: float) -> float:
+    """Baseline CO₂ partial pressure in kPa.
+
+    v4 step 1: convert the baseline CO₂ *fraction* into a *partial pressure*
+    using the baseline (typically atmospheric) pressure.
+
+        co2_pp_baseline = baseline_pressure × baseline_co2_fraction
+    """
+    return baseline_pressure_kpa * baseline_co2_fraction
 
 
 def calc_co2_pp_after(co2_pp_baseline: float, ph_baseline: float,
                       ph_max: float, pKw: float) -> float:
+    """CO₂ partial pressure (kPa) after biomethanisation.
+
+    v4 step 2: the pH-driven equilibrium shift formula. Input and output
+    are now both partial pressures in kPa.
+
+        co2_pp_after = co2_pp_baseline ×
+            ( (10^-pH_max)^2 / (10^-pKw + 10^-pH_max) )
+          / ( (10^-pH_baseline)^2 / (10^-pKw + 10^-pH_baseline) )
+    """
     ten_neg_pKw = 10 ** (-pKw)
     ten_neg_phM = 10 ** (-ph_max)
     ten_neg_phB = 10 ** (-ph_baseline)
@@ -104,112 +151,211 @@ def calc_co2_pp_after(co2_pp_baseline: float, ph_baseline: float,
     return numerator / denominator
 
 
-def calc_co2_converted(biogas_daily: float, co2_pp_baseline: float,
-                       exog_co2: float, co2_pp_after: float) -> float:
-    raw = biogas_daily * co2_pp_baseline + exog_co2 - (biogas_daily + exog_co2) * co2_pp_after
-    return max(raw, 0.0)
+def run_v4_equilibrium(
+    temp_c: float,
+    ph_baseline: float,
+    ph_change_allowed: float,
+    baseline_co2_fraction: float,
+    baseline_pressure_kpa: float,
+    operating_pressure_kpa: float,
+    daily_biogas: float,
+    exog_co2: float,
+) -> dict:
+    """Core v4 thermodynamic equilibrium calculation.
 
+    Used by every scenario (single feedstock, feedstock mix, operational data).
+    Returns a single result dict containing pressures, fractions, daily
+    volumes and the headline outputs (H₂ max, CH₄ gain, ratio).
+    """
+    # --- pH side ---
+    pKw    = calc_pKw(temp_c)
+    ph_max = calc_max_ph(ph_baseline, ph_change_allowed)
 
-# ──────────────────────────────────────────────────────────────────────────────
-# SCENARIO FUNCTIONS
-# ──────────────────────────────────────────────────────────────────────────────
+    # --- Pressure side (v4 new logic) ---
+    # (1) Convert the baseline CO₂ fraction into a partial pressure.
+    co2_pp_baseline = calc_co2_pp_baseline(baseline_pressure_kpa, baseline_co2_fraction)
 
-def run_scenario1_single(feedstock_key: str, temp_c: float,
-                         biogas_daily: float, exog_co2: float) -> dict:
-    fs = EXTENDED_FEEDSTOCKS_CALC[feedstock_key]
-    pKw = calc_pKw(temp_c)
-    co2_baseline = fs["co2_baseline"]
-    ph_baseline  = fs["ph_baseline"]
-    ph_max       = calc_max_ph(ph_baseline, fs["ph_change"])
-    co2_after    = calc_co2_pp_after(co2_baseline, ph_baseline, ph_max, pKw)
-    ch4_after    = 1.0 - co2_after
-    co2_converted = calc_co2_converted(biogas_daily, co2_baseline, exog_co2, co2_after)
+    # (2) Apply the pH-equilibrium shift on the partial pressure.
+    co2_pp_after = calc_co2_pp_after(co2_pp_baseline, ph_baseline, ph_max, pKw)
+
+    # (3) The remaining partial pressure is methane.
+    ch4_pp_after = max(operating_pressure_kpa - co2_pp_after, 0.0)
+
+    # (4) Convert partial pressures back to fractions, dividing by *operating* pressure.
+    co2_after_fraction = co2_pp_after / operating_pressure_kpa
+    ch4_after_fraction = ch4_pp_after / operating_pressure_kpa
+
+    # --- Daily volume balance ---
+    daily_total_in       = daily_biogas + exog_co2
+    daily_ch4_after      = daily_total_in * ch4_pp_after / operating_pressure_kpa
+    daily_co2_after      = daily_total_in - daily_ch4_after
+    co2_available_total  = daily_biogas * baseline_co2_fraction + exog_co2
+    co2_converted        = max(co2_available_total - daily_co2_after, 0.0)
+
+    # --- Headline outputs ---
+    h2_max               = co2_converted * H2_CO2_RATIO
+    ch4_baseline_volume  = daily_biogas * (1.0 - baseline_co2_fraction)
+    ch4_increase         = max(daily_ch4_after - ch4_baseline_volume, 0.0)
+    ch4_to_co2_ratio     = (ch4_pp_after / co2_pp_after) if co2_pp_after > 0 else float("inf")
+
     return {
-        "feedstock": feedstock_key,
-        "smp": fs["smp"],
-        "ch4_baseline": fs["ch4_baseline"],
-        "co2_baseline": co2_baseline,
-        "ph_baseline": ph_baseline,
-        "ph_change": fs["ph_change"],
-        "ph_max": ph_max,
-        "pKw": pKw,
-        "co2_after": co2_after,
-        "ch4_after": ch4_after,
-        "co2_converted": co2_converted,
-        "h2_max": co2_converted * H2_CO2_RATIO,
-        "ch4_increase": co2_converted,
-        "ch4_to_co2": ch4_after / co2_after if co2_after > 0 else float("inf"),
+        # pH side
+        "pKw":               pKw,
+        "ph_baseline":       ph_baseline,
+        "ph_change":         ph_change_allowed,
+        "ph_change_allowed": ph_change_allowed,
+        "ph_max":            ph_max,
+        # Pressures
+        "baseline_pressure_kpa":  baseline_pressure_kpa,
+        "operating_pressure_kpa": operating_pressure_kpa,
+        # Baseline gas composition
+        "co2_baseline":      baseline_co2_fraction,
+        "ch4_baseline":      1.0 - baseline_co2_fraction,
+        "co2_pp_baseline":   co2_pp_baseline,
+        # After biomethanisation — partial pressures (kPa) and fractions
+        "co2_pp_after":      co2_pp_after,
+        "ch4_pp_after":      ch4_pp_after,
+        "co2_after":         co2_after_fraction,
+        "ch4_after":         ch4_after_fraction,
+        # Daily volumes
+        "daily_biogas":         daily_biogas,
+        "exog_co2":             exog_co2,
+        "co2_available_total":  co2_available_total,
+        "daily_ch4_after":      daily_ch4_after,
+        "daily_co2_after":      daily_co2_after,
+        "co2_converted":        co2_converted,
+        # Headline outputs
+        "h2_max":            h2_max,
+        "ch4_increase":      ch4_increase,
+        "ch4_to_co2":        ch4_to_co2_ratio,
     }
 
 
-def run_scenario1_mix(feedstock_pcts: dict, temp_c: float,
-                      biogas_daily: float, exog_co2: float) -> dict | None:
-    pKw  = calc_pKw(temp_c)
+# ──────────────────────────────────────────────────────────────────────────────
+# SCENARIO FUNCTIONS  (thin wrappers around run_v4_equilibrium)
+# ──────────────────────────────────────────────────────────────────────────────
+
+def run_scenario1_single(feedstock_key: str,
+                         temp_c: float,
+                         baseline_pressure_kpa: float,
+                         operating_pressure_kpa: float,
+                         daily_biogas: float,
+                         exog_co2: float) -> dict:
+    """Scenario 1, single feedstock — uses the v4 equilibrium calc with
+    fixed feedstock properties from the extended database."""
+    fs  = EXTENDED_FEEDSTOCKS_CALC[feedstock_key]
+    res = run_v4_equilibrium(
+        temp_c                  = temp_c,
+        ph_baseline             = fs["ph_baseline"],
+        ph_change_allowed       = fs["ph_change"],
+        baseline_co2_fraction   = fs["co2_baseline"],
+        baseline_pressure_kpa   = baseline_pressure_kpa,
+        operating_pressure_kpa  = operating_pressure_kpa,
+        daily_biogas            = daily_biogas,
+        exog_co2                = exog_co2,
+    )
+    res.update({
+        "feedstock":    feedstock_key,
+        "smp":          fs["smp"],
+        # ch4_baseline / co2_baseline are already in res from run_v4_equilibrium
+    })
+    return res
+
+
+def run_scenario1_mix(feedstock_pcts: dict,
+                      temp_c: float,
+                      baseline_pressure_kpa: float,
+                      operating_pressure_kpa: float,
+                      daily_biogas: float,
+                      exog_co2: float) -> dict | None:
+    """Scenario 1, feedstock mix — blends two feedstocks then runs the
+    v4 equilibrium calc on the resulting composite properties.
+
+    Blending logic (unchanged from v3):
+      - Weighted average pH (log-domain, since pH is logarithmic)
+      - Volatile-solids-weighted specific methane production
+      - CO₂ fraction derived from SMP * (co2 / ch4) per feedstock
+    """
     keys = [k for k, v in feedstock_pcts.items() if v > 0]
     fracs = {k: feedstock_pcts[k] for k in keys}
     total_frac = sum(fracs.values())
     if total_frac == 0:
         return None
     norm = {k: v / total_frac for k, v in fracs.items()}
-    y_vs  = sum(norm[k] * EXTENDED_FEEDSTOCKS_CALC[k]["vs"] for k in keys)
+
+    y_vs = sum(norm[k] * EXTENDED_FEEDSTOCKS_CALC[k]["vs"] for k in keys)
     if y_vs == 0:
         return None
-    n_smp = sum(norm[k] * EXTENDED_FEEDSTOCKS_CALC[k]["vs"] * EXTENDED_FEEDSTOCKS_CALC[k]["smp"]
-                for k in keys) / y_vs
+
+    # SMP, weighted by VS
+    n_smp = sum(
+        norm[k] * EXTENDED_FEEDSTOCKS_CALC[k]["vs"] * EXTENDED_FEEDSTOCKS_CALC[k]["smp"]
+        for k in keys
+    ) / y_vs
+
+    # CO₂ mass derived per feedstock (kg CO₂ / kg VS) summed and weighted
     z_co2 = sum(
         norm[k] * EXTENDED_FEEDSTOCKS_CALC[k]["vs"] * EXTENDED_FEEDSTOCKS_CALC[k]["smp"]
         * EXTENDED_FEEDSTOCKS_CALC[k]["co2_baseline"] / EXTENDED_FEEDSTOCKS_CALC[k]["ch4_baseline"]
         for k in keys
     ) / y_vs
+
     co2_baseline = z_co2 / (n_smp + z_co2)
-    ph_baseline  = -math.log10(sum(10 ** (-EXTENDED_FEEDSTOCKS_CALC[k]["ph_baseline"]) * norm[k] for k in keys))
+    ph_baseline  = -math.log10(
+        sum(10 ** (-EXTENDED_FEEDSTOCKS_CALC[k]["ph_baseline"]) * norm[k] for k in keys)
+    )
     ph_change    = sum(EXTENDED_FEEDSTOCKS_CALC[k]["ph_change"] * norm[k] for k in keys)
-    ph_max       = calc_max_ph(ph_baseline, ph_change)
-    co2_after    = calc_co2_pp_after(co2_baseline, ph_baseline, ph_max, pKw)
-    ch4_after    = 1.0 - co2_after
-    co2_converted = calc_co2_converted(biogas_daily, co2_baseline, exog_co2, co2_after)
-    ch4_baseline  = 1.0 - co2_baseline
-    return {
+
+    res = run_v4_equilibrium(
+        temp_c                  = temp_c,
+        ph_baseline             = ph_baseline,
+        ph_change_allowed       = ph_change,
+        baseline_co2_fraction   = co2_baseline,
+        baseline_pressure_kpa   = baseline_pressure_kpa,
+        operating_pressure_kpa  = operating_pressure_kpa,
+        daily_biogas            = daily_biogas,
+        exog_co2                = exog_co2,
+    )
+    res.update({
         "feedstock": "Feed mix",
-        "smp": n_smp,
-        "ch4_baseline": ch4_baseline,
-        "co2_baseline": co2_baseline,
-        "ph_baseline": ph_baseline,
-        "ph_change": ph_change,
-        "ph_max": ph_max,
-        "pKw": pKw,
-        "co2_after": co2_after,
-        "ch4_after": ch4_after,
-        "co2_converted": co2_converted,
-        "h2_max": co2_converted * H2_CO2_RATIO,
-        "ch4_increase": co2_converted,
-        "ch4_to_co2": ch4_after / co2_after if co2_after > 0 else float("inf"),
-    }
+        "smp":       n_smp,
+    })
+    return res
 
 
-def run_scenario2(temp_c: float, ph_baseline: float, co2_pp_baseline: float,
-                  biogas_daily: float, exog_co2: float,
+def run_scenario2(temp_c: float,
+                  ph_baseline: float,
+                  co2_pp_baseline_fraction: float,
+                  baseline_pressure_kpa: float,
+                  operating_pressure_kpa: float,
+                  daily_biogas: float,
+                  exog_co2: float,
                   ph_change_allowed: float = 0.5) -> dict:
-    pKw           = calc_pKw(temp_c)
-    ph_max        = calc_max_ph(ph_baseline, ph_change_allowed)
-    co2_after     = calc_co2_pp_after(co2_pp_baseline, ph_baseline, ph_max, pKw)
-    ch4_after     = 1.0 - co2_after
-    co2_converted = calc_co2_converted(biogas_daily, co2_pp_baseline, exog_co2, co2_after)
-    return {
-        "pKw": pKw,
-        "ph_change_allowed": ph_change_allowed,
-        "ph_max": ph_max,
-        "co2_after": co2_after,
-        "ch4_after": ch4_after,
-        "co2_converted": co2_converted,
-        "h2_max": co2_converted * H2_CO2_RATIO,
-        "ch4_increase": co2_converted,
-        "ch4_to_co2": (1 - co2_after) / co2_after if co2_after > 0 else float("inf"),
-    }
+    """Scenario 2 — uses measured operational data (pH, CO₂ fraction,
+    daily biogas) with the v4 equilibrium calc.
+
+    Note: `co2_pp_baseline_fraction` is the CO₂ *fraction* in the biogas
+    at baseline conditions (kept as the input the user types). It is
+    converted to a partial pressure inside run_v4_equilibrium.
+    """
+    return run_v4_equilibrium(
+        temp_c                  = temp_c,
+        ph_baseline             = ph_baseline,
+        ph_change_allowed       = ph_change_allowed,
+        baseline_co2_fraction   = co2_pp_baseline_fraction,
+        baseline_pressure_kpa   = baseline_pressure_kpa,
+        operating_pressure_kpa  = operating_pressure_kpa,
+        daily_biogas            = daily_biogas,
+        exog_co2                = exog_co2,
+    )
 
 
-def calc_extended_db(temp_c: float) -> list[dict]:
-    pKw  = calc_pKw(temp_c)
+def calc_extended_db(temp_c: float,
+                     baseline_pressure_kpa: float,
+                     operating_pressure_kpa: float) -> list[dict]:
+    """Build the reference table for tab 3 using the v4 pressure-aware
+    equilibrium calculation. Daily volumes are not relevant here, so
+    we pass 0/0 — only the gas composition outputs are displayed."""
     rows = []
     for name, props in EXTENDED_FEEDSTOCKS.items():
         co2_pp = 1.0 - props["ch4_pp"]
@@ -217,29 +363,37 @@ def calc_extended_db(temp_c: float) -> list[dict]:
         ph_max = calc_max_ph(ph, props["ph_change"])
         if ph > PH_UPPER_LIMIT:
             rows.append({
-                "Feedstock": name,
-                "SMP (L/kg VS)": props["smp_l"],
-                "CH₄ baseline": f"{props['ch4_pp']:.0%}",
-                "CO₂ baseline": f"{co2_pp:.0%}",
-                "pH": ph,
-                "Max pH": "—",
-                "CO₂ after": "N/A",
-                "CH₄ after": "N/A",
-                "VS": f"{props['vs']:.0%}",
+                "Feedstock":       name,
+                "SMP (L/kg VS)":   props["smp_l"],
+                "CH₄ baseline":    f"{props['ch4_pp']:.0%}",
+                "CO₂ baseline":    f"{co2_pp:.0%}",
+                "pH":              ph,
+                "Max pH":          "—",
+                "CO₂ after":       "N/A",
+                "CH₄ after":       "N/A",
+                "VS":              f"{props['vs']:.0%}",
             })
             continue
-        co2_after = calc_co2_pp_after(co2_pp, ph, ph_max, pKw)
-        ch4_after = 1.0 - co2_after
+        r = run_v4_equilibrium(
+            temp_c                  = temp_c,
+            ph_baseline             = ph,
+            ph_change_allowed       = props["ph_change"],
+            baseline_co2_fraction   = co2_pp,
+            baseline_pressure_kpa   = baseline_pressure_kpa,
+            operating_pressure_kpa  = operating_pressure_kpa,
+            daily_biogas            = 0.0,
+            exog_co2                = 0.0,
+        )
         rows.append({
-            "Feedstock": name,
-            "SMP (L/kg VS)": props["smp_l"],
-            "CH₄ baseline": f"{props['ch4_pp']:.0%}",
-            "CO₂ baseline": f"{co2_pp:.0%}",
-            "pH": ph,
-            "Max pH": f"{ph_max:.1f}",
-            "CO₂ after": f"{co2_after:.2%}",
-            "CH₄ after": f"{ch4_after:.2%}",
-            "VS": f"{props['vs']:.0%}",
+            "Feedstock":       name,
+            "SMP (L/kg VS)":   props["smp_l"],
+            "CH₄ baseline":    f"{props['ch4_pp']:.0%}",
+            "CO₂ baseline":    f"{co2_pp:.0%}",
+            "pH":              ph,
+            "Max pH":          f"{ph_max:.1f}",
+            "CO₂ after":       f"{r['co2_after']:.2%}",
+            "CH₄ after":       f"{r['ch4_after']:.2%}",
+            "VS":              f"{props['vs']:.0%}",
         })
     return rows
 
@@ -507,10 +661,11 @@ st.markdown(f"""
 
 
 # ──────────────────────────────────────────────────────────────────────────────
-# GLOBAL TEMPERATURE INPUT (top of page, always visible)
+# GLOBAL PROCESS INPUTS — temperature + pressures (top of page, always visible)
 # ──────────────────────────────────────────────────────────────────────────────
 
 with st.container():
+    # Row 1 — Temperature + pKw + H₂:CO₂ ratio (unchanged from v3)
     tcol1, tcol2, tcol3 = st.columns([1, 2, 2])
     with tcol1:
         temp_c = st.number_input(
@@ -526,7 +681,7 @@ with st.container():
         pKw_val = calc_pKw(temp_c)
         st.markdown(f"""
         <div class="callout" style="margin-top:28px; padding: 12px 18px;">
-            <strong>pKw</strong> at {temp_c:.1f} °C &nbsp;=&nbsp; <span style="color:{PRIMARY_GREEN}; font-size:1.15rem; font-weight:700;">{round(pKw_val)}</span>
+            <strong>pKw</strong> at {temp_c:.1f} °C &nbsp;=&nbsp; <span style="color:{PRIMARY_GREEN}; font-size:1.15rem; font-weight:700;">{pKw_val:.3f}</span>
             <br/><span style="font-size:0.88rem; color:{LIGHT_GREY};">Temperature-dependent water dissociation constant used in CO₂ equilibrium calculations</span>
         </div>
         """, unsafe_allow_html=True)
@@ -538,7 +693,49 @@ with st.container():
         </div>
         """, unsafe_allow_html=True)
 
+    # Row 2 — Pressures (NEW in v4)
+    pcol1, pcol2, pcol3 = st.columns([1, 1, 3])
+    with pcol1:
+        baseline_pressure_kpa = st.number_input(
+            "Baseline pressure (kPa)",
+            min_value=50.0, max_value=500.0, value=DEFAULT_BASELINE_PRESSURE, step=0.5,
+            help=(
+                "The pressure at which the baseline CO₂ fraction is measured — typically "
+                "atmospheric (101.325 kPa). Used to convert the baseline CO₂ fraction "
+                "into a baseline CO₂ partial pressure in kPa, which the equilibrium "
+                "calculation then operates on."
+            ),
+        )
+    with pcol2:
+        operating_pressure_kpa = st.number_input(
+            "Operating pressure (kPa)",
+            min_value=50.0, max_value=1000.0, value=DEFAULT_OPERATING_PRESSURE, step=10.0,
+            help=(
+                "The digester operating pressure. The CO₂ partial pressure after "
+                "biomethanisation is divided by this value to get the new CO₂ "
+                "*fraction* in the biogas. Raising operating pressure squeezes "
+                "the same partial pressure of CO₂ into a smaller fraction of "
+                "the biogas — making more CO₂ convertible to CH₄."
+            ),
+        )
+    with pcol3:
+        # Show the baseline CO₂ partial pressure for the most common case
+        # so the user can sanity-check what the model is doing.
+        baseline_pp_demo = baseline_pressure_kpa * 0.40
+        st.markdown(f"""
+        <div class="callout" style="margin-top:28px; padding: 12px 18px;">
+            <strong>Pressure handling (v4)</strong> &nbsp;·&nbsp; Baseline CO₂ partial pressure
+            is calculated from the baseline pressure and CO₂ fraction (e.g. for 40% CO₂:
+            <span style="color:{PRIMARY_GREEN}; font-weight:600;">{baseline_pp_demo:.2f} kPa</span>).
+            <br/><span style="font-size:0.88rem; color:{LIGHT_GREY};">
+            The equilibrium shift is applied to the partial pressure, then divided by the
+            operating pressure to get the new CO₂ gas fraction.
+            </span>
+        </div>
+        """, unsafe_allow_html=True)
+
 st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
 
 # ──────────────────────────────────────────────────────────────────────────────
 # TABS
@@ -618,6 +815,7 @@ def render_results(res: dict):
         help=(
             "Methane fraction in the biogas at thermodynamic equilibrium after H₂ injection. "
             "This is the theoretical maximum CH₄ concentration achievable at these conditions. "
+            "Calculated as CH₄ partial pressure ÷ operating pressure. "
             "Real performance depends on mixing efficiency and microbial activity."
         ),
     )
@@ -626,8 +824,9 @@ def render_results(res: dict):
         f"{res['co2_after']:.1%}",
         help=(
             "Residual CO₂ fraction in the biogas at equilibrium. As H₂ is injected, "
-            "CO₂ is converted to CH₄ and this value decreases. The model calculates "
-            "the new equilibrium based on the pH shift and temperature."
+            "CO₂ is converted to CH₄ and this value decreases. Calculated as "
+            "CO₂ partial pressure ÷ operating pressure — so higher operating pressure "
+            "directly reduces the residual CO₂ fraction."
         ),
     )
     g3.metric(
@@ -640,6 +839,37 @@ def render_results(res: dict):
         ),
     )
     st.markdown('</div>', unsafe_allow_html=True)
+
+    # ── Partial pressures sub-panel (v4 new — concise, in the gas section) ──
+    if "co2_pp_after" in res and "ch4_pp_after" in res:
+        st.markdown('<div class="section-gas">', unsafe_allow_html=True)
+        pp1, pp2, pp3 = st.columns(3)
+        pp1.metric(
+            "CO₂ partial pressure (after)",
+            f"{res['co2_pp_after']:.2f} kPa",
+            help=(
+                "CO₂ partial pressure at equilibrium after biomethanisation. "
+                "This is the value the equilibrium formula calculates directly. "
+                "Divide by operating pressure to get the CO₂ fraction shown above."
+            ),
+        )
+        pp2.metric(
+            "CH₄ partial pressure (after)",
+            f"{res['ch4_pp_after']:.2f} kPa",
+            help=(
+                "CH₄ partial pressure at equilibrium = operating pressure − CO₂ partial pressure. "
+                "Divide by operating pressure to get the CH₄ fraction shown above."
+            ),
+        )
+        pp3.metric(
+            "Operating pressure",
+            f"{res.get('operating_pressure_kpa', operating_pressure_kpa):.1f} kPa",
+            help=(
+                "The digester operating pressure used to convert partial pressures "
+                "back into gas fractions."
+            ),
+        )
+        st.markdown('</div>', unsafe_allow_html=True)
 
     # ── pH panel — amber ──
     st.markdown('<div class="sec-head sec-head-process">Process conditions</div>', unsafe_allow_html=True)
@@ -684,6 +914,7 @@ def render_results(res: dict):
     co2_conv   = res.get("co2_converted", 0)
     ch4_gain   = res["ch4_increase"]
     h2_needed  = res["h2_max"]
+    co2_avail  = res.get("co2_available_total", 0)
 
     chart_left, chart_right = st.columns(2)
 
@@ -762,7 +993,7 @@ def render_results(res: dict):
 
     # ── Volume bar — only shown when there is conversion ──
     if ch4_gain > 0:
-        # These four values are all directly from res — no approximations
+        # Cleaner v4 chart: use actual daily volumes from the result dict.
         bar_labels = [
             "CO₂ in biogas<br>(available)",
             "CO₂ converted<br>→ CH₄",
@@ -770,7 +1001,7 @@ def render_results(res: dict):
             "H₂ needed<br>to inject",
         ]
         bar_values = [
-            co2_before * (co2_conv / (co2_before - co2_after)) if (co2_before - co2_after) > 0 else co2_conv,
+            co2_avail if co2_avail > 0 else co2_conv,
             co2_conv,
             ch4_gain,
             h2_needed,
@@ -898,7 +1129,10 @@ with tab1:
         )
         st.markdown('</div>', unsafe_allow_html=True)
 
-        res = run_scenario1_single(fs_choice, temp_c, biogas_s1, exog_s1)
+        res = run_scenario1_single(
+            fs_choice, temp_c, baseline_pressure_kpa, operating_pressure_kpa,
+            biogas_s1, exog_s1,
+        )
         render_results(res)
 
         # ── Feedstock comparison chart ──
@@ -910,13 +1144,16 @@ with tab1:
         st.markdown(
             '<p style="color:#a0a0a0; font-size:0.95rem; margin-bottom:12px;">'
             'CH₄ gain and H₂ requirement across all available feedstocks at the same '
-            'daily biogas volume and temperature. Your selected feedstock is highlighted.'
+            'daily biogas volume, temperature and operating pressure. Your selected feedstock is highlighted.'
             '</p>',
             unsafe_allow_html=True,
         )
         comp_names, comp_ch4, comp_h2, comp_colors_ch4, comp_colors_h2 = [], [], [], [], []
         for fs_name in EXTENDED_FEEDSTOCKS_CALC:
-            r_comp = run_scenario1_single(fs_name, temp_c, biogas_s1, exog_s1)
+            r_comp = run_scenario1_single(
+                fs_name, temp_c, baseline_pressure_kpa, operating_pressure_kpa,
+                biogas_s1, exog_s1,
+            )
             comp_names.append(fs_name)
             comp_ch4.append(r_comp["ch4_increase"])
             comp_h2.append(r_comp["h2_max"])
@@ -1015,7 +1252,10 @@ with tab1:
             )
 
         mix_pcts = {fs1: pct1 + pct2 if fs1 == fs2 else pct1, fs2: pct2} if fs1 != fs2 else {fs1: pct1 + pct2}
-        res_mix = run_scenario1_mix(mix_pcts, temp_c, biogas_mix, exog_mix)
+        res_mix = run_scenario1_mix(
+            mix_pcts, temp_c, baseline_pressure_kpa, operating_pressure_kpa,
+            biogas_mix, exog_mix,
+        )
         if res_mix:
             render_results(res_mix)
         else:
@@ -1104,8 +1344,12 @@ with tab2:
             ),
         )
 
-    res2 = run_scenario2(temp_c, ph_s2, co2_pp_s2, biogas_s2, exog_s2, ph_change_s2)
-    render_results({**res2, "ph_baseline": ph_s2, "co2_baseline": co2_pp_s2})
+    res2 = run_scenario2(
+        temp_c, ph_s2, co2_pp_s2,
+        baseline_pressure_kpa, operating_pressure_kpa,
+        biogas_s2, exog_s2, ph_change_s2,
+    )
+    render_results(res2)
 
     # ── pH safety gauge ──
     st.markdown(
@@ -1209,7 +1453,8 @@ with tab2:
     st.markdown(
         '<p style="color:#a0a0a0; font-size:0.95rem; margin-bottom:12px;">'
         'Shows how H₂ injection capacity and CH₄ gain change as the CO₂ fraction in your biogas varies '
-        'from 20% to 60% — all other inputs held constant. The orange marker shows your current value.'
+        'from 20% to 60% — all other inputs (including baseline and operating pressure) held constant. '
+        'The orange marker shows your current value.'
         '</p>',
         unsafe_allow_html=True,
     )
@@ -1217,7 +1462,11 @@ with tab2:
     co2_range = [round(x * 0.01, 2) for x in range(20, 61)]
     h2_vals, ch4_vals = [], []
     for co2_val in co2_range:
-        r = run_scenario2(temp_c, ph_s2, co2_val, biogas_s2, exog_s2, ph_change_s2)
+        r = run_scenario2(
+            temp_c, ph_s2, co2_val,
+            baseline_pressure_kpa, operating_pressure_kpa,
+            biogas_s2, exog_s2, ph_change_s2,
+        )
         h2_vals.append(r["h2_max"])
         ch4_vals.append(r["ch4_increase"])
 
@@ -1267,37 +1516,45 @@ with tab2:
 # ──────────────────────────────────────────────────────────────────────────────
 
 with tab3:
-    st.markdown("""
+    st.markdown(f"""
     <div class="callout">
         <strong>Feedstock reference data</strong> — Thermodynamic equilibrium properties calculated
-        at the current digester temperature. Feedstocks where the baseline pH already exceeds
-        the safety cap of 8.2 (e.g. poultry broilers manure) cannot be assessed for biomethanisation
-        — their pH would rise further and risk inhibiting methanogens.
+        at the current digester temperature, baseline pressure ({baseline_pressure_kpa:.1f} kPa)
+        and operating pressure ({operating_pressure_kpa:.1f} kPa). Feedstocks where the baseline pH
+        already exceeds the safety cap of {PH_UPPER_LIMIT} (e.g. poultry broilers manure) cannot be
+        assessed for biomethanisation — their pH would rise further and risk inhibiting methanogens.
     </div>
     """, unsafe_allow_html=True)
 
     st.markdown('<div class="sec-head">Extended feedstock database</div>', unsafe_allow_html=True)
-    db_rows = calc_extended_db(temp_c)
+    db_rows = calc_extended_db(temp_c, baseline_pressure_kpa, operating_pressure_kpa)
     st.dataframe(db_rows, use_container_width=True, hide_index=True)
 
     st.markdown('<div class="sec-head">Simplified categories (reference only)</div>',
                 unsafe_allow_html=True)
-    pKw = calc_pKw(temp_c)
     simple_rows = []
     for name, fs in SCENARIO1_FEEDSTOCKS.items():
-        ph_max    = calc_max_ph(fs["ph_baseline"], fs["ph_change"])
-        co2_after = calc_co2_pp_after(fs["co2_baseline"], fs["ph_baseline"], ph_max, pKw)
-        ch4_after = 1.0 - co2_after
+        ph_max = calc_max_ph(fs["ph_baseline"], fs["ph_change"])
+        r_simple = run_v4_equilibrium(
+            temp_c                  = temp_c,
+            ph_baseline             = fs["ph_baseline"],
+            ph_change_allowed       = fs["ph_change"],
+            baseline_co2_fraction   = fs["co2_baseline"],
+            baseline_pressure_kpa   = baseline_pressure_kpa,
+            operating_pressure_kpa  = operating_pressure_kpa,
+            daily_biogas            = 0.0,
+            exog_co2                = 0.0,
+        )
         simple_rows.append({
-            "Category": name,
-            "SMP (m³/kg VS)": fs["smp"],
-            "CH₄ baseline": f"{fs['ch4_baseline']:.0%}",
-            "CO₂ baseline": f"{fs['co2_baseline']:.0%}",
-            "pH": fs["ph_baseline"],
-            "Max pH": f"{ph_max:.1f}",
-            "CO₂ after": f"{co2_after:.2%}",
-            "CH₄ after": f"{ch4_after:.2%}",
-            "VS": f"{fs['vs']:.0%}",
+            "Category":         name,
+            "SMP (m³/kg VS)":   fs["smp"],
+            "CH₄ baseline":     f"{fs['ch4_baseline']:.0%}",
+            "CO₂ baseline":     f"{fs['co2_baseline']:.0%}",
+            "pH":               fs["ph_baseline"],
+            "Max pH":           f"{ph_max:.1f}",
+            "CO₂ after":        f"{r_simple['co2_after']:.2%}",
+            "CH₄ after":        f"{r_simple['ch4_after']:.2%}",
+            "VS":               f"{fs['vs']:.0%}",
         })
     st.dataframe(simple_rows, use_container_width=True, hide_index=True)
 
@@ -1320,6 +1577,13 @@ Both the allowed pH rise (default 0.5) and this hard cap protect against over-al
 **H₂ : CO₂ ratio (4):**
 Based on stoichiometry of CO₂ + 4H₂ → CH₄ + 2H₂O. In practice, mass-transfer limitations
 may mean slightly more H₂ is needed to achieve the same conversion. This model gives the theoretical minimum.
+
+**Pressure handling (v4):**
+The CO₂ baseline is first multiplied by the baseline pressure ({baseline_pressure_kpa:.1f} kPa)
+to give a partial pressure. The pH-driven equilibrium shift is applied to this partial pressure,
+and the result is divided by the operating pressure ({operating_pressure_kpa:.1f} kPa) to give the
+new CO₂ fraction. Higher operating pressure compresses the same CO₂ partial pressure into a
+smaller fraction of the biogas, making more CO₂ available for conversion to CH₄.
 """)
 
 
